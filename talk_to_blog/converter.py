@@ -16,11 +16,15 @@ def parse_srt(transcript: str) -> str:
         if line.isdigit():
             # Skip index line
             i += 1
-            if i < len(lines):
+            # Check if next line is a timestamp line
+            if i < len(lines) and '-->' in lines[i]:
                 # Skip timestamp line
                 i += 1
-            # Collect text lines until empty line
+            # Collect text lines until empty line or end
             while i < len(lines) and lines[i].strip():
+                # Skip if we encounter another index line (shouldn't happen in well-formed SRT)
+                if lines[i].strip().isdigit():
+                    break
                 text_lines.append(lines[i].strip())
                 i += 1
         i += 1
@@ -114,7 +118,6 @@ def convert_transcript_to_blog(
     author: Optional[str] = None,
     date: Optional[str] = None,
     include_frontmatter: bool = True,
-    chunk_size: int = frontmatter,
     chunk_size: int = 500
 ) -> str:
     """Convert transcript text to blog post format."""

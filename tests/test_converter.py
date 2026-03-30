@@ -24,6 +24,58 @@ This is a test.
         result = parse_srt(srt)
         self.assertEqual(result, "Hello world. This is a test.")
 
+    def test_srt_with_multiline_text(self):
+        srt = """1
+00:00:00,000 --> 00:00:02,000
+Hello world.
+This is line two.
+
+2
+00:00:02,000 --> 00:00:04,000
+This is a test.
+"""
+        result = parse_srt(srt)
+        self.assertEqual(result, "Hello world. This is line two. This is a test.")
+
+    def test_srt_missing_timestamp(self):
+        srt = """1
+Hello world.
+
+2
+00:00:02,000 --> 00:00:04,000
+This is a test.
+"""
+        result = parse_srt(srt)
+        # Should skip the first block since no timestamp, but still parse second
+        self.assertEqual(result, "This is a test.")
+
+    def test_srt_malformed_timestamp(self):
+        srt = """1
+00:00:00,000 - 00:00:02,000
+Hello world.
+
+2
+00:00:02,000 --> 00:00:04,000
+This is a test.
+"""
+        result = parse_srt(srt)
+        # Should skip the first block since timestamp is malformed (no '-->')
+        self.assertEqual(result, "This is a test.")
+
+    def test_srt_empty_input(self):
+        result = parse_srt("")
+        self.assertEqual(result, "")
+
+    def test_srt_no_text(self):
+        srt = """1
+00:00:00,000 --> 00:00:02,000
+
+2
+00:00:02,000 --> 00:00:04,000
+"""
+        result = parse_srt(srt)
+        self.assertEqual(result, "")
+
 
 class TestParseVTT(unittest.TestCase):
     def test_basic_vtt(self):
@@ -47,7 +99,6 @@ class TestCleanTranscript(unittest.TestCase):
 
     def test_remove_fillers(self):
         text = "Um, so like, you know, this is basically a test."
-        um, so like, you know, this is basically a test."
         result = clean_transcript(text)
         self.assertEqual(result, "this is a test.")
 
