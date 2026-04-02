@@ -1,50 +1,81 @@
 #!/usr/bin/env python3
-"""Core conversion logic for transforming transcripts into blog posts."""
+"""Pure conversion logic for transforming transcripts into blog posts."""
 import re
-from datetime import date, datetime
-from pathlib import Path
-from typing import Optional
+from dataclasses import dataclass
+from typing import List, Optional, Sequence, Tuple, Union
+
+DEFAULT_TITLE = "Conference Talk"
+DEFAULT_AUTHOR = "Speaker"
+SYSTEM_PROMPT = (
+    "You are an expert technical writer. Convert the provided conference transcript "
+    "into a structured, engaging markdown blog post. Preserve the original meaning and core logic "
+    "but improve flow, grammar, and engagement. Add appropriate markdown headers where logical shifts occur. "
+    "Do NOT include frontmatter or the top-level title heading; return body content only."
+)
+
+_SRT_TIMESTAMP_RE = re.compile(
+    r"^\d{2}:\d{2}:\d{2}[,.]\d{3}\s+-->\s+\d{2}:\d{2}:\d{2}[,.]\d{3}(?:\s+.*)?$"
+)
+_SPEAKER_LABEL_RE = re.compile(
+    r"(?P<prefix>^|[.!?\n]\s*)(?P<label>(?:[Ss]peaker\s*\d+|[A-Z][A-Za-z0-9_]*(?:\s+[A-Z0-9_][A-Za-z0-9_]*){0,2})):\s+(?=\S)",
+    flags=re.MULTILINE,
+)
+_CLAUSE_FILLER_RE = re.compile(
+    r"(^|[.!?\n]\s*|,\s*)(?:um|uh|you know|like|actually|basically)\b(?:,\s*)?",
+    flags=re.IGNORECASE | re.MULTILINE,
+)
+_INLINE_FILLER_RE = re.compile(
+    r"\b(?:actually|basically)\b(?=\s+(?:a|an|the|this|that|these|those|it|we|you|i|he|she|they)\b)",
+    flags=re.IGNORECASE,
+)
+_LEADING_SO_FILLER_RE = re.compile(
+    r"(^|[.!?\n]\s*)so\b(?=(?:,\s*|\s+(?:um|uh|you know|like|actually|basically)\b))",
+    flags=re.IGNORECASE | re.MULTILINE,
+)
+_NON_SPEAKER_LABELS = frozenset({"Note", "Tip", "Warning", "Example", "The API"})
+
+
+@dataclass(frozen=True)
+class ConversionRequest:
+    """Prompt payloads and metadata needed to request blog content from an AI model."""
+
+    title: str
+    author: str
+    pub_date: str
+    system_prompt: str
+    user_prompts: Tuple[str, ...]
 
 
 def parse_srt(transcript: str) -> str:
     """Parse SRT subtitle format and return plain text."""
-    lines = transcript.strip().split("\n")
-    text_lines = []
-    i = 0
-    while i < len(lines):
-        line = lines[i].strip()
-        if line.isdigit():
-            # Skip index line
-            i += 1
-            # Check if next line is a timestamp line
-            if i < len(lines) and '-->' in lines[i]:
-                # Skip timestamp line
-                i += 1
-            # Collect text lines until empty line or end
-            while i < len(lines) and lines[i].strip():
-                # Skip if we encounter another index line (shouldn't happen in well-formed SRT)
-                if lines[i].strip().isdigit():
-                    break
-                text_lines.append(lines[i].strip())
-                i += 1
-        i += 1
+    if not transcript.strip():
+        return ""
+
+    text_lines: List[str] = []
+    for block in re.split(r"\n\s*\n", transcript.strip()):
+        lines = [line.strip() for line in block.splitlines() if line.strip()]
+        if not lines:
+            continue
+        if lines[0].isdigit():
+            lines = lines[1:]
+        if not lines or not _SRT_TIMESTAMP_RE.match(lines[0]):
+            continue
+        text_lines.extend(lines[1:])
     return " ".join(text_lines)
 
 
 def parse_vtt(transcript: str) -> str:
     """Parse WebVTT format and return plain text."""
     lines = transcript.strip().split("\n")
-    text_lines = []
+    text_lines: List[str] = []
     skip_header = True
     for line in lines:
         if skip_header:
             if line.strip() == "":
                 skip_header = False
             continue
-        # Skip timestamp lines
         if "-->" in line:
             continue
-        # Skip cue identifiers (numbers)
         if line.strip().isdigit():
             continue
         if line.strip():
@@ -52,37 +83,56 @@ def parse_vtt(transcript: str) -> str:
     return " ".join(text_lines)
 
 
+def _replace_speaker_label(match: re.Match) -> str:
+    label = match.group("label")
+    if label in _NON_SPEAKER_LABELS:
+        return match.group(0)
+    return match.group("prefix")
+
+
+def _replace_clause_filler(match: re.Match) -> str:
+    prefix = match.group(1)
+    if prefix.startswith(","):
+        return " "
+    return prefix
+
+
 def clean_transcript(text: str) -> str:
     """Clean raw transcript text."""
-    # Remove speaker labels like "Speaker 1:" or "John:"
-    text = re.sub(r"^[A-Za-z0-9_]+:\s*", "", text, flags=re.MULTILINE)
-    # Remove filler words
-    fillers = ["um", "uh", "like", "you know", "so", "actually", "basically"]
-    for filler in fillers:
-        text = re.sub(r"\b" + filler + r"\b", "", text, flags=re.IGNORECASE)
-    # Normalize whitespace
+    text = _SPEAKER_LABEL_RE.sub(_replace_speaker_label, text)
+
+    previous = None
+    while text != previous:
+        previous = text
+        text = _LEADING_SO_FILLER_RE.sub(r"\1", text)
+        text = _CLAUSE_FILLER_RE.sub(_replace_clause_filler, text)
+        text = re.sub(r"\s+", " ", text).strip()
+
+    text = _INLINE_FILLER_RE.sub("", text)
+    text = re.sub(r"\s+([,.;!?])", r"\1", text)
     text = re.sub(r"\s+", " ", text).strip()
     return text
 
 
-def chunk_text(text: str, chunk_size: int = 500) -> list[str]:
+def chunk_text(text: str, chunk_size: int = 500) -> List[str]:
     """Split text into chunks of approximately chunk_size words."""
+    if chunk_size < 1:
+        raise ValueError("chunk_size must be positive")
+
     words = text.split()
-    chunks = []
-    current_chunk = []
+    chunks: List[str] = []
+    current_chunk: List[str] = []
     current_word_count = 0
-    
+
     for word in words:
         current_chunk.append(word)
         current_word_count += 1
         if current_word_count >= chunk_size:
-            # Try to break at sentence boundary
-            chunk_text = " ".join(current_chunk)
-            # Find last sentence boundary
-            last_period = chunk_text.rfind(".")
-            if last_period > len(chunk_text) * 0.7:  # If period is in last 30%
-                chunks.append(chunk_text[:last_period + 1].strip())
-                remaining = chunk_text[last_period + 1:].strip()
+            candidate_chunk = " ".join(current_chunk)
+            last_period = candidate_chunk.rfind(".")
+            if last_period > len(candidate_chunk) * 0.7:
+                chunks.append(candidate_chunk[: last_period + 1].strip())
+                remaining = candidate_chunk[last_period + 1 :].strip()
                 if remaining:
                     current_chunk = [remaining]
                     current_word_count = len(remaining.split())
@@ -90,71 +140,128 @@ def chunk_text(text: str, chunk_size: int = 500) -> list[str]:
                     current_chunk = []
                     current_word_count = 0
             else:
-                chunks.append(chunk_text)
+                chunks.append(candidate_chunk)
                 current_chunk = []
                 current_word_count = 0
-    
+
     if current_chunk:
         chunks.append(" ".join(current_chunk))
-    
+
     return chunks
+
+
+def _yaml_quote(value: str) -> str:
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+    return f'"{escaped}"'
 
 
 def generate_frontmatter(title: str, author: str, pub_date: str) -> str:
     """Generate YAML frontmatter for blog post."""
     return f"""---
-title: "{title}"
-author: "{author}"
-date: "{pub_date}"
+title: {_yaml_quote(title)}
+author: {_yaml_quote(author)}
+date: {_yaml_quote(pub_date)}
 ---
 
 """
 
 
-def convert_transcript_to_blog(
+def _resolve_metadata(
+    title: Optional[str],
+    author: Optional[str],
+    date: Optional[str],
+) -> Tuple[str, str, str]:
+    resolved_title = title or DEFAULT_TITLE
+    resolved_author = author or DEFAULT_AUTHOR
+    resolved_date = date or ""
+    return resolved_title, resolved_author, resolved_date
+
+
+def _build_user_prompt(
+    title: str,
+    author: str,
+    pub_date: str,
+    transcript_chunk: str,
+    chunk_index: int,
+    total_chunks: int,
+) -> str:
+    if total_chunks == 1:
+        chunk_note = "Convert the full transcript into polished markdown sections."
+    else:
+        chunk_note = (
+            f"Convert chunk {chunk_index} of {total_chunks} into polished markdown sections "
+            "that can be concatenated with the rest of the post without repeating the title."
+        )
+
+    return (
+        f"Title: {title}\n"
+        f"Author: {author}\n"
+        f"Date: {pub_date}\n"
+        f"Chunk: {chunk_index}/{total_chunks}\n\n"
+        f"{chunk_note}\n"
+        "Do not include frontmatter or the top-level title heading.\n\n"
+        f"Transcript:\n{transcript_chunk}"
+    )
+
+
+def prepare_conversion_request(
     transcript: str,
     transcript_format: str = "txt",
     title: Optional[str] = None,
     author: Optional[str] = None,
     date: Optional[str] = None,
-    include_frontmatter: bool = True,
-    chunk_size: int = 500
-) -> str:
-    """Convert transcript text to blog post format."""
-    # Parse based on format
+    chunk_size: int = 500,
+) -> ConversionRequest:
+    """Parse, clean, chunk, and package transcript content for an AI request."""
     if transcript_format == "srt":
         text = parse_srt(transcript)
     elif transcript_format == "vtt":
         text = parse_vtt(transcript)
-    else:  # txt
-        text = transcript
-    
-    # Clean the text
-    text = clean_transcript(text)
-    
-    # Generate title if not provided
-    if not title:
-        title = "Conference Talk"
-    
-    # Set defaults
-    if not author:
-        author = "Speaker"
-    if not date:
-        pub_date = datetime.now().strftime("%Y-%m-%d")
     else:
-        pub_date = date
-    
-    # Chunk the text
-    chunks = chunk_text(text, chunk_size)
-    
-    # Build blog post
-    blog_parts = []
+        text = transcript
+
+    text = clean_transcript(text)
+    resolved_title, resolved_author, resolved_date = _resolve_metadata(title, author, date)
+    chunks = chunk_text(text, chunk_size=chunk_size) or [""]
+    user_prompts = tuple(
+        _build_user_prompt(
+            resolved_title,
+            resolved_author,
+            resolved_date,
+            chunk,
+            chunk_index=index,
+            total_chunks=len(chunks),
+        )
+        for index, chunk in enumerate(chunks, start=1)
+    )
+    return ConversionRequest(
+        title=resolved_title,
+        author=resolved_author,
+        pub_date=resolved_date,
+        system_prompt=SYSTEM_PROMPT,
+        user_prompts=user_prompts,
+    )
+
+
+def convert_transcript_to_blog(
+    ai_content: Union[str, Sequence[str]],
+    title: Optional[str] = None,
+    author: Optional[str] = None,
+    date: Optional[str] = None,
+    include_frontmatter: bool = True,
+) -> str:
+    """Compose the final blog post from AI-generated markdown body content."""
+    resolved_title, resolved_author, resolved_date = _resolve_metadata(title, author, date)
+
+    if isinstance(ai_content, str):
+        sections = [ai_content.strip()]
+    else:
+        sections = [section.strip() for section in ai_content if section and section.strip()]
+
+    blog_parts: List[str] = []
     if include_frontmatter:
-        blog_parts.append(generate_frontmatter(title, author, pub_date))
-    
-    blog_parts.append(f"# {title}\n\n")
-    
-    for i, chunk in enumerate(chunks, 1):
-        blog_parts.append(f"## Part {i}\n\n{chunk}\n\n")
-    
+        blog_parts.append(generate_frontmatter(resolved_title, resolved_author, resolved_date))
+
+    blog_parts.append(f"# {resolved_title}\n\n")
+    blog_parts.append("\n\n".join(sections))
     return "".join(blog_parts)
