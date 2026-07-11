@@ -1,105 +1,76 @@
 # Talk to Blog
 
-A command-line tool that leverages **OpenRouter AI** to intelligently convert conference talk transcripts into polished, structured markdown blog posts.
+Turn conference talks, interviews, and YouTube captions into useful Markdown learning artifacts. `talk-to-blog` uses any OpenAI-compatible chat-completions endpoint while keeping its core dependency-free.
 
-Unlike traditional text-splitters, `talk-to-blog` dynamically processes raw, messy transcripts (complete with filler words and timestamp artifacts) and instructs LLMs to output coherent, logically structured markdown text, while enforcing a static-site friendly frontmatter header.
-
-## Features
-
-- **AI-Powered Logic**: Uses OpenRouter.ai to access any major LLM (`claude-3-haiku`, `llama-3`, `gpt-4o`, etc.) to structure and rewrite the content.
-- **Multiple Transcript Formats**: Extracts text natively from `.txt`, `.srt`, and `.vtt` formats by scrubbing timestamps and headers prior to AI processing.
-- **Dynamic AI Model Selection**: Choose your preferred OpenRouter AI Model via a `.env` file or dynamically at runtime via a CLI flag.
-- **Frontmatter Generation**: Readily generates YAML frontmatter so the markdown is ready-to-publish for Static Site Generators like Hugo, Jekyll, or NextJS.
-- **Customizable Overrides**: Specify Authors, Titles, and Publication Dates effortlessly.
-- **Zero-Dependency Architecture**: Built using only the Python standard library. No bloated third-party installations.
-
-## Installation
-
-Because this tool is built cleanly using standard native libraries, installation is incredibly simple:
+## Install
 
 ```bash
-# Clone the repository
-git clone https://github.com/ryan258/talk-to-blog.git
-cd talk-to-blog
-
-# Install in development mode natively
-pip install -e .
+pipx install talk-to-blog             # after the project is published to PyPI
+# or, from a clone:
+python -m pip install -e .
 ```
 
-## Configuration (Environment Variables)
+## Configure
 
-`talk-to-blog` connects to the AI exclusively via OpenRouter to maximize model flexibility.
-
-Create a `.env` file in the directory where you plan to execute the command:
+Create `.env` next to a transcript or in the current directory:
 
 ```bash
-# .env
 OPENROUTER_API_KEY="sk-or-v1-..."
-OPENROUTER_MODEL="meta-llama/llama-3-8b-instruct" # Optional: define your default fallback model
+OPENROUTER_MODEL="meta-llama/llama-3-8b-instruct"
 ```
 
-> **Note:** The application reads `.env` natively without `python-dotenv`. It looks first next to the transcript file, then in the current working directory, and finally falls back to real environment variables for missing keys. Make sure not to commit the `.env` file.
+For Ollama, LM Studio, or another compatible service, set `OPENAI_BASE_URL` (or the legacy-compatible `OPENROUTER_BASE_URL`) to its full chat-completions endpoint. A key is required only for OpenRouter; other services decide whether to require one.
 
-## Usage
-
-### Basic Execution
-
-By default, the script writes each run into an `output/` directory next to the transcript using the pattern `YYYYMMDD-talk-title.md`. Use `-o` to override the file path, or `-o -` to write to `stdout`.
+## Examples
 
 ```bash
-# Convert a plain text transcript and write to output/20240510-my-talk.md
-talk-to-blog transcript.txt -t "My Talk" -d "2024-05-10"
+# A default blog post; title, description, and tags are generated when title is omitted.
+talk-to-blog talk.vtt
 
-# Override the AI model dynamically via the CLI and force stdout
-talk-to-blog transcript.txt -m anthropic/claude-3-opus -o -
+# Learning artifacts.
+talk-to-blog talk.srt --style notes
+talk-to-blog talk.txt --style summary -o -
+talk-to-blog interview.txt --style actions --keep-speakers
+
+# Anki-ready CSV (the model emits validated Q:/A: pairs).
+talk-to-blog talk.txt --style flashcards -o deck.csv
+
+# Pipelines, formats, batches, and optional YouTube captions.
+pbpaste | talk-to-blog - --style eli5 -o -
+talk-to-blog conference-transcripts/ -o learning-output/
+talk-to-blog 'https://www.youtube.com/watch?v=example' --style notes
+
+# Inspect prompts without sending transcript data to an API.
+talk-to-blog talk.txt --style notes --dry-run
 ```
 
-### Transcript Formats
+`yt-dlp` is optional and is only needed for YouTube URLs. It must be installed separately and captions must be available.
 
-If you are using subtitles (`.srt` or `.vtt`), specify the format so the tool scrubs timestamps before making AI calls:
+## Reliable long runs
 
-```bash
-talk-to-blog talk.srt --format srt -o blog.md
-talk-to-blog talk.vtt --format vtt -t "An Example Conference Talk" -o blog.md
-```
+Multi-chunk work is sequential to preserve ordering and avoid rate-limit bursts. Retryable network, 429, and 5xx failures are retried three times. Each successful chunk is stored in a fingerprinted `.partial.json` file next to its output, and a matching rerun resumes automatically. The partial file is deleted on success.
 
-### Full Options Command
+Progress and aggregate prompt/completion token counts are written to stderr. Token counts are not price estimates; check your chosen provider's pricing.
 
-```bash
-talk-to-blog transcript.txt \
-  -f txt \
-  -m anthropic/claude-3-haiku \
-  -t "The Future of Python Programming" \
-  -a "Jane Doe" \
-  -d "2024-05-10" \
-  -o my-blog-post.md
-```
+## Command reference
 
-### Command Reference
+| Option | Purpose |
+| --- | --- |
+| `--style` | `blog` (default), `notes`, `summary`, `actions`, `flashcards`, or `eli5` |
+| `-f`, `--format` | `txt`, `srt`, or `vtt`; subtitle formats are inferred from the extension |
+| `--keep-speakers` | Preserve dialogue attribution for panels and interviews |
+| `--prompt-file PATH` | Replace the selected style prompt with your own prompt |
+| `--endpoint URL` | Override the OpenAI-compatible chat-completions endpoint |
+| `--timeout SECONDS` | API timeout; default 120 seconds |
+| `--dry-run` | Print prepared prompts without loading credentials or calling an API |
+| `--meta KEY=VALUE` | Add YAML frontmatter metadata; repeat as needed |
+| `-o`, `--output` | Output file, batch-output directory, or `-` for stdout |
+| `--version` | Print the installed version |
 
-| Flag | Name | Description | Default |
-|------|------|-------------|---------|
-| `transcript` | Path | Positional argument targeting the transcript file. | **Required** |
-| `-o` | `--output` | Output file path override. Use `-` to write to stdout. | `transcript_dir/output/YYYYMMDD-talk-title.md` |
-| `-f` | `--format` | Parse the file as `txt`, `srt`, or `vtt`. | `txt` |
-| `-m` | `--model` | OpenRouter Model identifier (overrides `.env`). | Fallbacks to `.env` |
-|      | `--chunk-size` | Approximate words per AI section request. Large transcripts are split across multiple prompts. | `500` |
-| `-t` | `--title` | The blog post title generated in the frontmatter and H1. | `Conference Talk` |
-| `-a` | `--author` | The author's name inside the frontmatter. | `Speaker` |
-| `-d` | `--date` | The publication date generated in the frontmatter. | *Today's local date* |
-|      | `--no-frontmatter` | Action flag to bypass generating the YAML header entirely. | `False` |
-
-## Advanced Architecture Context
-
-Because this project aims to act as a strict integration layer, developers looking to contribute should review the documentation enclosed in `docs/architecture/`. The CLI owns filesystem, environment, and OpenRouter HTTP calls; `talk_to_blog.converter` remains a pure planning/composition module.
-
-## Development & Testing
+## Development
 
 ```bash
-# Run the test suite natively
 python3 -m unittest discover tests
 ```
 
-## License
-
-MIT License
+The CLI owns filesystem, environment, subprocess, and HTTP I/O. The converter remains pure, which keeps parsing, prompt preparation, and output composition fast to test.

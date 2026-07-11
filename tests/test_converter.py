@@ -12,6 +12,15 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from talk_to_blog.cli import (
+    CompletionResult,
+    build_run_fingerprint,
+    build_parser,
+    convert_one,
+    infer_transcript_format,
+    load_partial_sections,
+    parse_metadata_response,
+    request_completion_with_retry,
+    save_partial_sections,
     extract_openrouter_content,
     load_env,
     main,
@@ -19,13 +28,16 @@ from talk_to_blog.cli import (
     request_openrouter_completion,
 )
 from talk_to_blog.converter import (
+    STYLE_PROMPTS,
     chunk_text,
     clean_transcript,
     convert_transcript_to_blog,
+    extract_flashcards,
     generate_frontmatter,
     parse_srt,
     parse_vtt,
     prepare_conversion_request,
+    with_continuity_context,
 )
 
 
@@ -148,6 +160,10 @@ class TestCleanTranscript(unittest.TestCase):
         result = clean_transcript(text)
         self.assertEqual(result, "Please do so. Next sentence.")
 
+    def test_preserves_speaker_labels_when_requested(self):
+        result = clean_transcript("John: Hello there. Mary: Hi!", remove_speaker_labels=False)
+        self.assertEqual(result, "John: Hello there. Mary: Hi!")
+
 
 class TestChunkText(unittest.TestCase):
     def test_small_text(self):
@@ -186,6 +202,16 @@ class TestGenerateFrontmatter(unittest.TestCase):
         result = convert_transcript_to_blog("Body", title="My Talk", author="Jane Doe")
         self.assertIn('date: ""', result)
 
+    def test_frontmatter_includes_string_and_list_metadata(self):
+        result = generate_frontmatter(
+            "My Title",
+            "John Doe",
+            "2024-01-01",
+            extras={"description": "A useful talk", "tags": ["python", "testing"]},
+        )
+        self.assertIn('description: "A useful talk"', result)
+        self.assertIn('tags: ["python", "testing"]', result)
+
 
 class TestConversionPlanning(unittest.TestCase):
     def test_prepare_conversion_request_uses_chunk_size(self):
@@ -203,6 +229,29 @@ Hello world.
 """
         request = prepare_conversion_request(srt, transcript_format="srt")
         self.assertIn("Transcript:\nHello world.", request.user_prompts[0])
+
+    def test_prepare_conversion_request_selects_style_and_preserves_speakers(self):
+        request = prepare_conversion_request(
+            "Alice: Explain testing.", style="notes", keep_speakers=True
+        )
+        self.assertEqual(request.system_prompt, STYLE_PROMPTS["notes"])
+        self.assertIn("Alice: Explain testing.", request.user_prompts[0])
+
+    def test_prepare_conversion_request_rejects_unknown_style(self):
+        with self.assertRaisesRegex(ValueError, "Unsupported style"):
+            prepare_conversion_request("Hello", style="unknown")
+
+    def test_continuity_context_carries_headings_and_recent_ending(self):
+        prompt = with_continuity_context(
+            "Transcript:\nNext part.",
+            "## Earlier section\n\nThis is the first sentence. This is the final sentence.",
+        )
+        self.assertIn("Earlier section", prompt)
+        self.assertIn("final sentence", prompt)
+
+    def test_extract_flashcards_parses_question_answer_pairs(self):
+        cards = extract_flashcards("Q: What is TDD?\nA: Tests before code.\n\nQ: Why?\nA: Confidence.")
+        self.assertEqual(cards, [("What is TDD?", "Tests before code."), ("Why?", "Confidence.")])
 
 
 class TestConvertTranscriptToBlog(unittest.TestCase):
@@ -282,6 +331,36 @@ class TestCliHelpers(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "rate limited"):
             extract_openrouter_content(payload)
 
+    def test_infers_subtitle_format_from_file_extension(self):
+        self.assertEqual(infer_transcript_format(Path("talk.vtt"), None), "vtt")
+        self.assertEqual(infer_transcript_format(Path("talk.srt"), "txt"), "txt")
+
+    def test_parses_metadata_json_with_code_fence(self):
+        metadata = parse_metadata_response('```json\n{"title":"Useful Talk","description":"Why it matters","tags":["python"]}\n```')
+        self.assertEqual(metadata["title"], "Useful Talk")
+        self.assertEqual(metadata["tags"], ["python"])
+
+    def test_partial_sections_only_load_for_matching_fingerprint(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            partial_path = Path(tempdir) / "post.md.partial.json"
+            save_partial_sections(partial_path, "matching", ["one"])
+            self.assertEqual(load_partial_sections(partial_path, "matching"), ["one"])
+            self.assertEqual(load_partial_sections(partial_path, "different"), [])
+
+    def test_fingerprint_changes_when_prompt_configuration_changes(self):
+        first = build_run_fingerprint("transcript", "model-a", "system", 500, "notes")
+        second = build_run_fingerprint("transcript", "model-b", "system", 500, "notes")
+        self.assertNotEqual(first, second)
+
+    @patch("talk_to_blog.cli.request_openrouter_completion")
+    @patch("talk_to_blog.cli.time.sleep")
+    def test_retries_retryable_request_failure(self, mock_sleep, mock_request):
+        from talk_to_blog.cli import RequestError
+        mock_request.side_effect = [RequestError("busy", retryable=True), CompletionResult("done", {})]
+        result = request_completion_with_retry("key", "model", "system", "user", attempts=2)
+        self.assertEqual(result.content, "done")
+        mock_sleep.assert_called_once_with(1)
+
     @patch("urllib.request.urlopen")
     def test_request_openrouter_completion(self, mock_urlopen):
         response = MagicMock()
@@ -297,10 +376,10 @@ class TestCliHelpers(unittest.TestCase):
             user_prompt="user prompt",
         )
 
-        self.assertEqual(content, "Generated markdown")
+        self.assertEqual(content.content, "Generated markdown")
         request = mock_urlopen.call_args.args[0]
         self.assertEqual(request.full_url, "https://openrouter.ai/api/v1/chat/completions")
-        self.assertEqual(mock_urlopen.call_args.kwargs["timeout"], 60)
+        self.assertEqual(mock_urlopen.call_args.kwargs["timeout"], 120)
 
     @patch("urllib.request.urlopen")
     def test_request_openrouter_completion_http_error(self, mock_urlopen):
@@ -320,8 +399,45 @@ class TestCliHelpers(unittest.TestCase):
                 user_prompt="user prompt",
             )
 
+    def test_short_flags_mapping(self):
+        args = build_parser().parse_args([
+            "talk.txt",
+            "-e", "http://local:11434/v1",
+            "-c", "300",
+            "-s", "notes",
+            "-p", "my-prompt.txt",
+            "-k",
+            "-n",
+        ])
+        self.assertEqual(args.endpoint, "http://local:11434/v1")
+        self.assertEqual(args.chunk_size, 300)
+        self.assertEqual(args.style, "notes")
+        self.assertEqual(args.prompt_file, "my-prompt.txt")
+        self.assertTrue(args.keep_speakers)
+        self.assertTrue(args.dry_run)
+
 
 class TestMain(unittest.TestCase):
+    @patch("talk_to_blog.cli.download_youtube_transcript")
+    def test_main_parses_downloaded_youtube_captions_as_vtt(self, mock_download):
+        mock_download.return_value = "WEBVTT\n\n00:00:00.000 --> 00:00:02.000\nHello world.\n"
+        stdout_buffer = io.StringIO()
+        with patch("sys.argv", ["talk-to-blog", "https://youtu.be/example", "--dry-run"]):
+            with redirect_stdout(stdout_buffer):
+                main()
+        self.assertIn("Transcript:\nHello world.", stdout_buffer.getvalue())
+
+    @patch("talk_to_blog.cli.request_completion_with_retry")
+    def test_usage_includes_metadata_request(self, mock_request):
+        mock_request.side_effect = [
+            CompletionResult('{"title":"Useful Talk","description":"Desc","tags":["python"]}', {"prompt_tokens": 3}),
+            CompletionResult("Generated markdown", {"prompt_tokens": 5, "completion_tokens": 2}),
+        ]
+        args = build_parser().parse_args(["talk.txt"])
+        with tempfile.TemporaryDirectory() as tempdir:
+            _, _, usage = convert_one("Hello world.", Path(tempdir) / "talk.txt", args, {"OPENROUTER_API_KEY": "key"})
+        self.assertEqual(usage, {"prompt_tokens": 8, "completion_tokens": 2})
+
     @patch("talk_to_blog.cli.request_openrouter_completion", return_value="Generated markdown")
     def test_main_reads_env_next_to_transcript(self, mock_request):
         with tempfile.TemporaryDirectory() as project_dir, tempfile.TemporaryDirectory() as run_dir:
@@ -341,7 +457,7 @@ class TestMain(unittest.TestCase):
                         main()
 
         self.assertIn("# Conference Talk", stdout_buffer.getvalue())
-        self.assertEqual(stderr_buffer.getvalue(), "")
+        self.assertIn("Processing chunk 1/1", stderr_buffer.getvalue())
         self.assertEqual(mock_request.call_args.kwargs["api_key"], "from-project")
         self.assertEqual(mock_request.call_args.kwargs["ai_model"], "model-from-env")
 

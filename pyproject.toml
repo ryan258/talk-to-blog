@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "talk-to-blog"
+version = "0.2.0"
+description = "Turn talk transcripts into Markdown learning artifacts"
+readme = "README.md"
+requires-python = ">=3.8"
+license = {text = "MIT"}
+authors = [{name = "Ryan Johnson", email = "ryanleejwebdev@gmail.com"}]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "Intended Audience :: Education",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Topic :: Text Processing :: Markup",
+]
+
+[project.urls]
+Homepage = "https://github.com/ryan258/talk-to-blog"
+
+[project.scripts]
+talk-to-blog = "talk_to_blog.cli:main"
+y2t = "talk_to_blog.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["talk_to_blog*"]

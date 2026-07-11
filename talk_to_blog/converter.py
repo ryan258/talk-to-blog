@@ -2,7 +2,7 @@
 """Pure conversion logic for transforming transcripts into blog posts."""
 import re
 from dataclasses import dataclass
-from typing import List, Optional, Sequence, Tuple, Union
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union
 
 DEFAULT_TITLE = "Conference Talk"
 DEFAULT_AUTHOR = "Speaker"
@@ -12,6 +12,31 @@ SYSTEM_PROMPT = (
     "but improve flow, grammar, and engagement. Add appropriate markdown headers where logical shifts occur. "
     "Do NOT include frontmatter or the top-level title heading; return body content only."
 )
+STYLE_PROMPTS: Dict[str, str] = {
+    "blog": SYSTEM_PROMPT,
+    "notes": (
+        "You are an expert educator. Turn the transcript into concise Markdown study notes. "
+        "Use headings, key concepts, definitions, examples, and open questions where useful. "
+        "Preserve meaning. Do not include frontmatter or a top-level title."
+    ),
+    "summary": (
+        "You are an expert technical editor. Summarize the transcript in Markdown with a TL;DR, "
+        "5–10 key takeaways, and who should watch the full talk. Do not include frontmatter or a top-level title."
+    ),
+    "actions": (
+        "You are an expert learning coach. Extract a Markdown action plan from the transcript: "
+        "specific, attributable next steps and practical checklists. Do not invent actions. "
+        "Do not include frontmatter or a top-level title."
+    ),
+    "flashcards": (
+        "Create durable study flashcards from the transcript. Return only Q: question / A: answer pairs, "
+        "one pair per concept, with no Markdown table, title, or frontmatter. Keep answers self-contained."
+    ),
+    "eli5": (
+        "Explain the transcript in approachable Markdown for an intelligent beginner outside this field. "
+        "Use concrete analogies without losing important nuance. Do not include frontmatter or a top-level title."
+    ),
+}
 
 _SRT_TIMESTAMP_RE = re.compile(
     r"^\d{2}:\d{2}:\d{2}[,.]\d{3}\s+-->\s+\d{2}:\d{2}:\d{2}[,.]\d{3}(?:\s+.*)?$"
@@ -42,6 +67,7 @@ class ConversionRequest:
     title: str
     author: str
     pub_date: str
+    cleaned_transcript: str
     system_prompt: str
     user_prompts: Tuple[str, ...]
 
@@ -97,9 +123,10 @@ def _replace_clause_filler(match: re.Match) -> str:
     return prefix
 
 
-def clean_transcript(text: str) -> str:
+def clean_transcript(text: str, remove_speaker_labels: bool = True) -> str:
     """Clean raw transcript text."""
-    text = _SPEAKER_LABEL_RE.sub(_replace_speaker_label, text)
+    if remove_speaker_labels:
+        text = _SPEAKER_LABEL_RE.sub(_replace_speaker_label, text)
 
     previous = None
     while text != previous:
@@ -155,15 +182,29 @@ def _yaml_quote(value: str) -> str:
     return f'"{escaped}"'
 
 
-def generate_frontmatter(title: str, author: str, pub_date: str) -> str:
-    """Generate YAML frontmatter for blog post."""
-    return f"""---
-title: {_yaml_quote(title)}
-author: {_yaml_quote(author)}
-date: {_yaml_quote(pub_date)}
----
+def _yaml_value(value: Any) -> str:
+    if isinstance(value, (list, tuple)):
+        return "[" + ", ".join(_yaml_quote(str(item)) for item in value) + "]"
+    return _yaml_quote(str(value))
 
-"""
+
+def generate_frontmatter(
+    title: str,
+    author: str,
+    pub_date: str,
+    extras: Optional[Mapping[str, Any]] = None,
+) -> str:
+    """Generate YAML frontmatter for blog post."""
+    lines = [
+        "---",
+        f"title: {_yaml_quote(title)}",
+        f"author: {_yaml_quote(author)}",
+        f"date: {_yaml_quote(pub_date)}",
+    ]
+    for key, value in (extras or {}).items():
+        if re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]*", key):
+            lines.append(f"{key}: {_yaml_value(value)}")
+    return "\n".join(lines) + "\n---\n\n"
 
 
 def _resolve_metadata(
@@ -211,6 +252,9 @@ def prepare_conversion_request(
     author: Optional[str] = None,
     date: Optional[str] = None,
     chunk_size: int = 500,
+    style: str = "blog",
+    keep_speakers: bool = False,
+    system_prompt: Optional[str] = None,
 ) -> ConversionRequest:
     """Parse, clean, chunk, and package transcript content for an AI request."""
     if transcript_format == "srt":
@@ -220,7 +264,9 @@ def prepare_conversion_request(
     else:
         text = transcript
 
-    text = clean_transcript(text)
+    if style not in STYLE_PROMPTS:
+        raise ValueError(f"Unsupported style: {style}")
+    text = clean_transcript(text, remove_speaker_labels=not keep_speakers)
     resolved_title, resolved_author, resolved_date = _resolve_metadata(title, author, date)
     chunks = chunk_text(text, chunk_size=chunk_size) or [""]
     user_prompts = tuple(
@@ -238,9 +284,37 @@ def prepare_conversion_request(
         title=resolved_title,
         author=resolved_author,
         pub_date=resolved_date,
-        system_prompt=SYSTEM_PROMPT,
+        cleaned_transcript=text,
+        system_prompt=system_prompt or STYLE_PROMPTS[style],
         user_prompts=user_prompts,
     )
+
+
+def with_continuity_context(user_prompt: str, previous_section: str) -> str:
+    """Attach bounded, model-generated continuity hints to a later chunk prompt."""
+    headings = re.findall(r"^#{2,6}\s+(.+?)\s*$", previous_section, flags=re.MULTILINE)
+    sentences = re.findall(r"[^.!?]+[.!?]", previous_section)
+    ending = " ".join(sentences[-2:]).strip() or previous_section.strip()[-500:]
+    context_parts = []
+    if headings:
+        context_parts.append("Existing section headings: " + "; ".join(headings[-8:]))
+    if ending:
+        context_parts.append("Previous section ending: " + ending[-500:])
+    if not context_parts:
+        return user_prompt
+    return user_prompt + "\n\nContinuity context (do not repeat it verbatim):\n" + "\n".join(context_parts)
+
+
+def extract_flashcards(content: str) -> List[Tuple[str, str]]:
+    """Parse the deliberately simple Q:/A: flashcard interchange format."""
+    cards: List[Tuple[str, str]] = []
+    pattern = re.compile(r"^Q:\s*(.+?)\s*\nA:\s*(.+?)(?=\n\s*Q:|\Z)", re.MULTILINE | re.DOTALL)
+    for match in pattern.finditer(content.strip()):
+        question = re.sub(r"\s+", " ", match.group(1)).strip()
+        answer = re.sub(r"\s+", " ", match.group(2)).strip()
+        if question and answer:
+            cards.append((question, answer))
+    return cards
 
 
 def convert_transcript_to_blog(
@@ -249,6 +323,7 @@ def convert_transcript_to_blog(
     author: Optional[str] = None,
     date: Optional[str] = None,
     include_frontmatter: bool = True,
+    frontmatter_extras: Optional[Mapping[str, Any]] = None,
 ) -> str:
     """Compose the final blog post from AI-generated markdown body content."""
     resolved_title, resolved_author, resolved_date = _resolve_metadata(title, author, date)
@@ -260,7 +335,7 @@ def convert_transcript_to_blog(
 
     blog_parts: List[str] = []
     if include_frontmatter:
-        blog_parts.append(generate_frontmatter(resolved_title, resolved_author, resolved_date))
+        blog_parts.append(generate_frontmatter(resolved_title, resolved_author, resolved_date, frontmatter_extras))
 
     blog_parts.append(f"# {resolved_title}\n\n")
     blog_parts.append("\n\n".join(sections))
