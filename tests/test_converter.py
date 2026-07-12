@@ -145,6 +145,20 @@ class TestCleanTranscript(unittest.TestCase):
         result = clean_transcript(text)
         self.assertEqual(result, "The API: returns JSON.")
 
+    def test_removes_article_led_speaker_labels(self):
+        self.assertEqual(clean_transcript("A: hello there."), "hello there.")
+        self.assertEqual(clean_transcript("The Interviewer: hello there."), "hello there.")
+
+    def test_remove_youtube_transcript_timestamps(self):
+        text = "0:00\nwelcome to the talk.\n0:03\ntoday we cover testing.\n1:02:15\nthanks for watching."
+        result = clean_transcript(text)
+        self.assertEqual(result, "welcome to the talk. today we cover testing. thanks for watching.")
+
+    def test_keep_inline_time_mentions(self):
+        text = "The meeting starts at 9:30 sharp."
+        result = clean_transcript(text)
+        self.assertEqual(result, "The meeting starts at 9:30 sharp.")
+
     def test_remove_speaker_label_with_lowercase_speech(self):
         text = "Speaker 1: hello there."
         result = clean_transcript(text)
@@ -235,7 +249,20 @@ Hello world.
             "Alice: Explain testing.", style="notes", keep_speakers=True
         )
         self.assertEqual(request.system_prompt, STYLE_PROMPTS["notes"])
+        self.assertIn("preserve the conversational structure", request.user_prompts[0].lower())
         self.assertIn("Alice: Explain testing.", request.user_prompts[0])
+
+    def test_keep_speakers_prompt_preserves_conversational_attribution(self):
+        request = prepare_conversion_request(
+            "Alice: Explain testing.", keep_speakers=True
+        )
+        self.assertIn("preserve the conversational structure", request.user_prompts[0].lower())
+
+    def test_keep_speakers_does_not_modify_a_custom_prompt(self):
+        request = prepare_conversion_request(
+            "Alice: Explain testing.", keep_speakers=True, system_prompt="Custom prompt"
+        )
+        self.assertEqual(request.system_prompt, "Custom prompt")
 
     def test_prepare_conversion_request_rejects_unknown_style(self):
         with self.assertRaisesRegex(ValueError, "Unsupported style"):
@@ -248,6 +275,13 @@ Hello world.
         )
         self.assertIn("Earlier section", prompt)
         self.assertIn("final sentence", prompt)
+
+    def test_continuity_context_uses_an_unterminated_latest_section(self):
+        prompt = with_continuity_context(
+            "Transcript:\nNext part.",
+            "## Earlier section\n\nA complete sentence.\n\n## Latest section\nStill underway",
+        )
+        self.assertIn("Still underway", prompt)
 
     def test_extract_flashcards_parses_question_answer_pairs(self):
         cards = extract_flashcards("Q: What is TDD?\nA: Tests before code.\n\nQ: Why?\nA: Confidence.")
@@ -437,6 +471,40 @@ class TestMain(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tempdir:
             _, _, usage = convert_one("Hello world.", Path(tempdir) / "talk.txt", args, {"OPENROUTER_API_KEY": "key"})
         self.assertEqual(usage, {"prompt_tokens": 8, "completion_tokens": 2})
+
+    @patch("talk_to_blog.cli.request_completion_with_retry")
+    def test_multi_chunk_conversion_includes_all_prior_headings(self, mock_request):
+        mock_request.side_effect = [
+            CompletionResult("## Foundation\nFirst ending.", {}),
+            CompletionResult("## Practice\nSecond ending.", {}),
+            CompletionResult("## Review\nThird ending.", {}),
+        ]
+        args = build_parser().parse_args(["talk.txt", "-t", "My Talk", "-c", "2", "-o", "-"])
+
+        convert_one(
+            "Alpha one. Bravo two. Charlie three.",
+            Path("talk.txt"),
+            args,
+            {"OPENROUTER_API_KEY": "key"},
+        )
+
+        third_chunk_prompt = mock_request.call_args_list[2].args[3]
+        self.assertIn("Foundation; Practice", third_chunk_prompt)
+
+    @patch("talk_to_blog.cli.convert_one")
+    def test_batch_mode_reports_a_summary(self, mock_convert_one):
+        mock_convert_one.return_value = ("", None, {})
+        with tempfile.TemporaryDirectory() as tempdir:
+            Path(tempdir, "first.txt").write_text("First talk.", encoding="utf-8")
+            Path(tempdir, "second.txt").write_text("Second talk.", encoding="utf-8")
+            stderr_buffer = io.StringIO()
+            with patch("sys.argv", ["talk-to-blog", tempdir, "-t", "Batch", "--dry-run"]):
+                with redirect_stderr(stderr_buffer):
+                    main()
+
+        self.assertEqual(mock_convert_one.call_count, 2)
+        self.assertIn("Batch summary:", stderr_buffer.getvalue())
+        self.assertIn("Totals: 2 succeeded, 0 failed", stderr_buffer.getvalue())
 
     @patch("talk_to_blog.cli.request_openrouter_completion", return_value="Generated markdown")
     def test_main_reads_env_next_to_transcript(self, mock_request):

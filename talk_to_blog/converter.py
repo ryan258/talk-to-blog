@@ -58,6 +58,9 @@ _LEADING_SO_FILLER_RE = re.compile(
     flags=re.IGNORECASE | re.MULTILINE,
 )
 _NON_SPEAKER_LABELS = frozenset({"Note", "Tip", "Warning", "Example", "The API"})
+# ponytail: matches YouTube "Show transcript" copy-paste; a content line that is
+# only a bare clock time also disappears, acceptable for spoken-word transcripts
+_TIMESTAMP_LINE_RE = re.compile(r"^\s*\d{1,2}:\d{2}(?::\d{2})?\s*$", re.MULTILINE)
 
 
 @dataclass(frozen=True)
@@ -125,6 +128,7 @@ def _replace_clause_filler(match: re.Match) -> str:
 
 def clean_transcript(text: str, remove_speaker_labels: bool = True) -> str:
     """Clean raw transcript text."""
+    text = _TIMESTAMP_LINE_RE.sub("", text)
     if remove_speaker_labels:
         text = _SPEAKER_LABEL_RE.sub(_replace_speaker_label, text)
 
@@ -280,6 +284,12 @@ def prepare_conversion_request(
         )
         for index, chunk in enumerate(chunks, start=1)
     )
+    if keep_speakers:
+        user_prompts = tuple(
+            prompt
+            + "\n\nPreserve the conversational structure and attribute quotes to speakers."
+            for prompt in user_prompts
+        )
     return ConversionRequest(
         title=resolved_title,
         author=resolved_author,
@@ -294,7 +304,8 @@ def with_continuity_context(user_prompt: str, previous_section: str) -> str:
     """Attach bounded, model-generated continuity hints to a later chunk prompt."""
     headings = re.findall(r"^#{2,6}\s+(.+?)\s*$", previous_section, flags=re.MULTILINE)
     sentences = re.findall(r"[^.!?]+[.!?]", previous_section)
-    ending = " ".join(sentences[-2:]).strip() or previous_section.strip()[-500:]
+    trailing_text = re.split(r"[.!?]", previous_section)[-1].strip()
+    ending = trailing_text[-500:] if trailing_text else " ".join(sentences[-2:]).strip()
     context_parts = []
     if headings:
         context_parts.append("Existing section headings: " + "; ".join(headings[-8:]))

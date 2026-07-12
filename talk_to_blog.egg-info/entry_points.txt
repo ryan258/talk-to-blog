@@ -1,2 +1,0 @@
-[console_scripts]
-talk-to-blog = talk_to_blog.cli:main

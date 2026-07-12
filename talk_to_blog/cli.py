@@ -260,7 +260,7 @@ def convert_one(transcript_text: str, transcript_path: Optional[Path], args: arg
         if index <= len(sections):
             print(f"Resuming chunk {index}/{len(request.user_prompts)}…", file=sys.stderr)
             continue
-        prompt = with_continuity_context(base_prompt, sections[-1]) if sections else base_prompt
+        prompt = with_continuity_context(base_prompt, "\n\n".join(sections)) if sections else base_prompt
         print(f"Processing chunk {index}/{len(request.user_prompts)}…", file=sys.stderr)
         result = _as_completion_result(request_completion_with_retry(api_key, model, request.system_prompt, prompt, endpoint=endpoint, timeout=args.timeout))
         sections.append(result.content)
@@ -350,6 +350,7 @@ def main() -> None:
         else:
             print(f"Error: File '{source}' not found", file=sys.stderr); sys.exit(1)
     failures = 0
+    batch_results: List[Tuple[str, str]] = []
     for text, path in source_texts:
         env_vars = load_env(((path.parent / ".env") if path else Path.cwd() / ".env", Path.cwd() / ".env"))
         if len(source_texts) > 1 and args.output and args.output != "-":
@@ -366,11 +367,22 @@ def main() -> None:
                 print(f"Written to {output_path}", file=sys.stderr)
             if usage:
                 print(f"Usage: {usage['prompt_tokens']} prompt tokens, {usage['completion_tokens']} completion tokens", file=sys.stderr)
+            batch_results.append((str(path or args.transcript), "succeeded"))
         except (OSError, ValueError, subprocess.CalledProcessError) as error:
-            failures += 1; print(f"Error converting {path or args.transcript}: {error}", file=sys.stderr)
+            failures += 1
+            batch_results.append((str(path or args.transcript), "failed"))
+            print(f"Error converting {path or args.transcript}: {error}", file=sys.stderr)
         finally:
             if original_output is not None:
                 args.output = original_output
+    if len(source_texts) > 1:
+        print("Batch summary:", file=sys.stderr)
+        for source_name, status in batch_results:
+            print(f"  {status:<9} {source_name}", file=sys.stderr)
+        print(
+            f"Totals: {len(source_texts) - failures} succeeded, {failures} failed",
+            file=sys.stderr,
+        )
     if failures:
         sys.exit(1)
 

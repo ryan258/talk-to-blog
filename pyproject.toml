@@ -14,7 +14,6 @@ classifiers = [
   "Development Status :: 3 - Alpha",
   "Environment :: Console",
   "Intended Audience :: Education",
-  "License :: OSI Approved :: MIT License",
   "Operating System :: OS Independent",
   "Programming Language :: Python :: 3",
   "Topic :: Text Processing :: Markup",
@@ -25,6 +24,7 @@ Homepage = "https://github.com/ryan258/talk-to-blog"
 
 [project.scripts]
 talk-to-blog = "talk_to_blog.cli:main"
+talk-to-blog-web = "talk_to_blog.web:main"
 y2t = "talk_to_blog.cli:main"
 
 [tool.setuptools.packages.find]
