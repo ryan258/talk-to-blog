@@ -24,8 +24,16 @@ STYLE_PROMPTS: Dict[str, str] = {
         "5–10 key takeaways, and who should watch the full talk. Do not include frontmatter or a top-level title."
     ),
     "actions": (
-        "You are an expert learning coach. Extract a Markdown action plan from the transcript: "
-        "specific, attributable next steps and practical checklists. Do not invent actions. "
+        "You are an expert meeting analyst. Extract only what the transcript supports; never invent, "
+        "infer an owner, or upgrade a mention into a choice. Use these Markdown sections, omitting empty ones:\n"
+        "## Decisions: something a speaker chose or the group agreed on, stated as settled.\n"
+        "## Commitments: someone explicitly took a task on. Format `- [ ] task (owner; due if stated) @ source`.\n"
+        "## Open questions: raised and left unresolved or deferred.\n"
+        "## Suggestions (not adopted): ideas merely mentioned, proposed, or floated with no stated choice "
+        "or agreement. If unsure whether something was chosen, it belongs here.\n"
+        "Format every other item `- text (who) @ source`, with a short verbatim quote after it when that "
+        "helps verify it. A source is the nearest preceding [HH:MM:SS] marker in the transcript, or the "
+        "chunk label (e.g. chunk 2/5) when there are no markers. "
         "Do not include frontmatter or a top-level title."
     ),
     "flashcards": (
@@ -57,6 +65,8 @@ _LEADING_SO_FILLER_RE = re.compile(
     r"(^|[.!?\n]\s*)so\b(?=(?:,\s*|\s+(?:um|uh|you know|like|actually|basically)\b))",
     flags=re.IGNORECASE | re.MULTILINE,
 )
+_STAMP_INTERVAL_SECONDS = 30
+_STAMP_RE = re.compile(r"\[\d{2}:\d{2}:\d{2}\]")
 _NON_SPEAKER_LABELS = frozenset({"Note", "Tip", "Warning", "Example", "The API"})
 # ponytail: matches YouTube "Show transcript" copy-paste; a content line that is
 # only a bare clock time also disappears, acceptable for spoken-word transcripts
@@ -75,12 +85,34 @@ class ConversionRequest:
     user_prompts: Tuple[str, ...]
 
 
-def parse_srt(transcript: str) -> str:
-    """Parse SRT subtitle format and return plain text."""
+def _stamp(start: str, last: List[float]) -> str:
+    """Return a [HH:MM:SS] marker for a cue start, or "" if one was emitted under 30s ago."""
+    parts = [0.0] * (3 - len(start.split(":"))) + [float(p.replace(",", ".")) for p in start.split(":")]
+    seconds = parts[0] * 3600 + parts[1] * 60 + parts[2]
+    if last and 0 <= seconds - last[0] < _STAMP_INTERVAL_SECONDS:
+        return ""
+    last[:] = [seconds]
+    return f"[{int(seconds // 3600):02d}:{int(seconds % 3600 // 60):02d}:{int(seconds % 60):02d}]"
+
+
+def _carry_stamps(chunks: List[str]) -> List[str]:
+    """Open each chunk with the latest earlier marker so its first items have a source."""
+    carried: List[str] = []
+    last = ""
+    for chunk in chunks:
+        carried.append(chunk if last == "" or _STAMP_RE.match(chunk) else f"{last} {chunk}")
+        found = _STAMP_RE.findall(chunk)
+        last = found[-1] if found else last
+    return carried
+
+
+def parse_srt(transcript: str, timestamps: bool = False) -> str:
+    """Parse SRT subtitle format and return plain text; optionally keep sparse time markers."""
     if not transcript.strip():
         return ""
 
     text_lines: List[str] = []
+    last: List[float] = []
     for block in re.split(r"\n\s*\n", transcript.strip()):
         lines = [line.strip() for line in block.splitlines() if line.strip()]
         if not lines:
@@ -89,14 +121,17 @@ def parse_srt(transcript: str) -> str:
             lines = lines[1:]
         if not lines or not _SRT_TIMESTAMP_RE.match(lines[0]):
             continue
+        if timestamps and lines[1:]:
+            text_lines.append(_stamp(lines[0].split()[0], last))
         text_lines.extend(lines[1:])
-    return " ".join(text_lines)
+    return " ".join(filter(None, text_lines))
 
 
-def parse_vtt(transcript: str) -> str:
-    """Parse WebVTT format and return plain text."""
+def parse_vtt(transcript: str, timestamps: bool = False) -> str:
+    """Parse WebVTT format and return plain text; optionally keep sparse time markers."""
     lines = transcript.strip().split("\n")
     text_lines: List[str] = []
+    last: List[float] = []
     skip_header = True
     for line in lines:
         if skip_header:
@@ -104,12 +139,14 @@ def parse_vtt(transcript: str) -> str:
                 skip_header = False
             continue
         if "-->" in line:
+            if timestamps:
+                text_lines.append(_stamp(line.split("-->")[0].strip(), last))
             continue
         if line.strip().isdigit():
             continue
         if line.strip():
             text_lines.append(line.strip())
-    return " ".join(text_lines)
+    return " ".join(filter(None, text_lines))
 
 
 def _replace_speaker_label(match: re.Match) -> str:
@@ -261,10 +298,12 @@ def prepare_conversion_request(
     system_prompt: Optional[str] = None,
 ) -> ConversionRequest:
     """Parse, clean, chunk, and package transcript content for an AI request."""
+    stamped = style == "actions"  # source locations need the cue times other styles discard
+    keep_speakers = keep_speakers or stamped  # owners of commitments must survive cleanup
     if transcript_format == "srt":
-        text = parse_srt(transcript)
+        text = parse_srt(transcript, timestamps=stamped)
     elif transcript_format == "vtt":
-        text = parse_vtt(transcript)
+        text = parse_vtt(transcript, timestamps=stamped)
     else:
         text = transcript
 
@@ -273,6 +312,8 @@ def prepare_conversion_request(
     text = clean_transcript(text, remove_speaker_labels=not keep_speakers)
     resolved_title, resolved_author, resolved_date = _resolve_metadata(title, author, date)
     chunks = chunk_text(text, chunk_size=chunk_size) or [""]
+    if stamped:
+        chunks = _carry_stamps(chunks)
     user_prompts = tuple(
         _build_user_prompt(
             resolved_title,

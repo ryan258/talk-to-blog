@@ -264,6 +264,47 @@ Hello world.
         )
         self.assertEqual(request.system_prompt, "Custom prompt")
 
+    def test_actions_style_keeps_sparse_time_markers_for_source_locations(self):
+        srt = """1
+00:00:00,000 --> 00:00:02,000
+We ship Friday.
+
+2
+00:00:10,000 --> 00:00:12,000
+Maybe try Redis.
+
+3
+00:01:05,000 --> 00:01:07,000
+Dana will own it.
+"""
+        actions = prepare_conversion_request(srt, transcript_format="srt", style="actions")
+        self.assertIn("[00:00:00] We ship Friday. Maybe try Redis. [00:01:05] Dana will own it.", actions.cleaned_transcript)
+        vtt = "WEBVTT\n\n01:05.000 --> 01:07.000\nDana will own it.\n"
+        self.assertEqual(parse_vtt(vtt, timestamps=True), "[00:01:05] Dana will own it.")
+        self.assertNotIn("[", prepare_conversion_request(srt, transcript_format="srt", style="notes").cleaned_transcript)
+
+    def test_actions_chunks_inherit_the_preceding_time_marker(self):
+        cues = "\n\n".join(
+            f"{i}\n00:00:{i * 20:02d},000 --> 00:00:{i * 20 + 2:02d},000\nword{i} a b c d." for i in range(1, 3)
+        )
+        cues += "\n\n3\n00:01:00,000 --> 00:01:02,000\nlast one here now."
+        request = prepare_conversion_request(cues, transcript_format="srt", style="actions", chunk_size=6)
+        self.assertGreater(len(request.user_prompts), 2)
+        for prompt in request.user_prompts:
+            self.assertRegex(prompt.split("Transcript:\n", 1)[1], r"^\[\d{2}:\d{2}:\d{2}\]")
+
+    def test_actions_keeps_every_speaker_label(self):
+        request = prepare_conversion_request(
+            "Alice: I will send the report.\nBob: I will review it.", style="actions"
+        )
+        self.assertIn("Alice:", request.cleaned_transcript)
+        self.assertIn("Bob:", request.cleaned_transcript)
+
+    def test_actions_prompt_separates_chosen_from_suggested(self):
+        prompt = STYLE_PROMPTS["actions"]
+        for heading in ("## Decisions", "## Commitments", "## Open questions", "## Suggestions (not adopted)"):
+            self.assertIn(heading, prompt)
+
     def test_prepare_conversion_request_rejects_unknown_style(self):
         with self.assertRaisesRegex(ValueError, "Unsupported style"):
             prepare_conversion_request("Hello", style="unknown")

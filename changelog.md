@@ -2,6 +2,14 @@
 
 All notable user-facing changes are recorded here.
 
+## [Unreleased]
+
+### Changed
+
+- The `actions` style now extracts decisions, explicit commitments, open questions, and suggestions
+  that were never adopted, each with a source location (sparse `[HH:MM:SS]` markers from SRT/VTT,
+  otherwise the chunk label).
+
 ## [0.2.0] - 2026-07-11
 
 ### Added

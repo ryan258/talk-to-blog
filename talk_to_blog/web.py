@@ -38,7 +38,7 @@ STYLE_BLURBS = {
     "blog": ("Blog post", "A polished post, ready to publish"),
     "notes": ("Study notes", "Key concepts, definitions, examples"),
     "summary": ("Summary", "TL;DR and key takeaways"),
-    "actions": ("Action plan", "A checklist of next steps"),
+    "actions": ("Actions", "Decisions, commitments, open questions"),
     "flashcards": ("Flashcards", "Q&A pairs for spaced review"),
     "eli5": ("Explain simply", "Plain language, no jargon"),
 }

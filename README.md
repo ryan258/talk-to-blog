@@ -56,7 +56,7 @@ Progress and aggregate prompt/completion token counts are written to stderr. Tok
 
 | Option | Purpose |
 | --- | --- |
-| `--style` | `blog` (default), `notes`, `summary`, `actions`, `flashcards`, or `eli5` |
+| `--style` | `blog` (default), `notes`, `summary`, `actions`, `flashcards`, or `eli5`; `actions` extracts decisions, commitments, open questions, and suggestions-not-adopted, each with a source (`[HH:MM:SS]` for SRT/VTT, else the chunk) |
 | `-f`, `--format` | `txt`, `srt`, or `vtt`; subtitle formats are inferred from the extension |
 | `--keep-speakers` | Preserve dialogue attribution for panels and interviews |
 | `--prompt-file PATH` | Replace the selected style prompt with your own prompt |
